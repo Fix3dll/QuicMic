@@ -245,7 +245,7 @@ QuicMic is designed to be lightweight — lock-free hot paths, no allocations pe
 
 - Make sure the phone and PC are on the **same network**. Some guest Wi-Fi networks and routers with "AP/client isolation" block device-to-device traffic.
 - **Firewall / antivirus.** On first launch, allow QuicMic through **Windows Defender Firewall** when prompted (at least on *Private* networks). Some third-party security suites (for example **ESET**, Norton, Kaspersky) can **silently block** the port with no prompt at all — if you can't connect, open your security software and allow QuicMic, or allow inbound **TCP _and_ UDP on port `8443`** (or whichever `--port` you chose).
-- If your PC has several network adapters or a VPN, the auto-detected address may be wrong. Override it with `--ip <your-LAN-IP>`.
+- **VPN / proxy TUN adapters are filtered out.** QuicMic skips the fake address that proxy TUN adapters in fake-ip mode put on the default route — mihomo/Clash, sing-box, Surge and similar all default to the `198.18.0.0/15` range — and picks a real LAN address instead. If the auto-detected address is still wrong in an unusual network layout, override it with `--ip <your-LAN-IP>`.
 
 **It connects, but the transport shows "WebSocket" instead of "WebTransport"**
 

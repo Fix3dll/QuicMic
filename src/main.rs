@@ -43,6 +43,121 @@ fn noise_gate_db_to_linear(db: f32) -> f32 {
     }
 }
 
+/// Address ranges that can never serve as a LAN pairing target reachable from
+/// another device. The load-bearing exclusion is 198.18.0.0/15 — the IETF
+/// benchmarking range (RFC 2544) that fake-ip proxy TUNs (mihomo/Clash,
+/// sing-box, Surge, etc.) all use as their default fake-ip range: the TUN
+/// adapter holding e.g. 198.18.0.1 is a fake address that nothing on the real
+/// LAN can route to.
+fn is_unusable_lan_addr(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            o[0] == 0 // 0.0.0.0/8 "this network"
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || (o[0] == 198 && (o[1] == 18 || o[1] == 19)) // RFC 2544 benchmark = fake-ip
+                || o[0] >= 224 // multicast / reserved
+        }
+        IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unspecified()
+                // Link-local IPv6 needs a zone id to route and is explicitly out
+                // of scope for QuicMic's pairing URL.
+                || (v6.segments()[0] & 0xffc0) == 0xfe80
+        }
+    }
+}
+
+/// Rank how usable an address is as a LAN pairing target; higher wins. RFC 1918
+/// private addresses are the most likely to be reachable by a phone on the same
+/// LAN (2). CGNAT (100.64/10, used by Tailscale and some ISPs) and any IPv6
+/// (global/ULA) are the second tier (1). Public IPv4 is the last resort (0).
+/// The caller breaks rank ties in favour of IPv4, so a same-rank IPv4 always
+/// beats a same-rank IPv6 regardless of enumeration order.
+fn lan_addr_rank(ip: IpAddr) -> u8 {
+    match ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            let rfc1918 = o[0] == 10
+                || (o[0] == 172 && (16..=31).contains(&o[1]))
+                || (o[0] == 192 && o[1] == 168);
+            if rfc1918 {
+                2
+            } else if o[0] == 100 && (64..=127).contains(&o[1]) {
+                1
+            } else {
+                0
+            }
+        }
+        IpAddr::V6(_) => 1,
+    }
+}
+
+/// Name patterns of common virtual adapters. Same-rank ties are broken in
+/// favour of physical NICs, so a Hyper-V/WSL/Docker/VMware adapter holding an
+/// otherwise-valid LAN address (a `vEthernet`/`docker0`/`vmnet` … with an RFC
+/// 1918 address) loses to the real Wi-Fi/Ethernet even when both are equally
+/// ranked. Keep this list conservative: a false positive only demotes an
+/// equally-ranked candidate, never the only candidate.
+fn is_virtual_adapter(name: &str) -> bool {
+    const KEYWORDS: [&str; 11] = [
+        "vethernet",
+        "wsl",
+        "docker",
+        "veth",
+        "vmnet",
+        "virbr",
+        "tailscale",
+        "zerotier",
+        "tun",
+        "tap",
+        "awdl",
+    ];
+    let n = name.to_ascii_lowercase();
+    KEYWORDS.iter().any(|k| n.contains(k))
+}
+
+/// Pick the best LAN address from an interface scan: drop unusable ranges, then
+/// prefer the highest-ranked address class, breaking rank ties in favour of
+/// IPv4 (matching the historical IPv4-first detection).
+///
+/// Two same-rank, same-family candidates (e.g. a real Wi-Fi `192.168.x` and a
+/// Hyper-V/VPN `172.x`) are both valid; virtual adapters (`is_virtual_adapter`)
+/// lose such ties, and the remaining ones resolve by `max_by_key`'s "last
+/// maximum" rule — i.e. OS enumeration order. This only happens on the
+/// fallback path (when the default-route pick was unusable); `--ip` remains
+/// the manual override for multi-homed setups where the wrong address would be
+/// advertised.
+fn pick_lan_ip(ifas: Vec<(String, IpAddr)>) -> Option<IpAddr> {
+    ifas.into_iter()
+        .filter(|(_, ip)| !is_unusable_lan_addr(*ip))
+        .max_by_key(|(name, ip)| (lan_addr_rank(*ip), ip.is_ipv4(), !is_virtual_adapter(name)))
+        .map(|(_, ip)| ip)
+}
+
+/// Detect an IP address that other devices on the LAN can actually reach.
+///
+/// `local_ip_address::local_ip()` returns the first IPv4 unicast address among
+/// the adapters that own a default route. That is usually right, but goes wrong
+/// when a proxy TUN in fake-ip mode (mihomo/Clash, sing-box, Surge, etc.) owns
+/// a default route with a low metric: the TUN's fake address (198.18.0.1) wins
+/// even though nothing on the LAN can route to it. So the default-route pick is
+/// trusted only
+/// when it is a usable LAN address; otherwise every interface is scanned and the
+/// best-ranked candidate (typically the real Ethernet/Wi-Fi address) is used.
+fn detect_lan_ip() -> anyhow::Result<IpAddr> {
+    if let Ok(ip) = local_ip_address::local_ip() {
+        if !is_unusable_lan_addr(ip) {
+            return Ok(ip);
+        }
+    }
+    let ifas = local_ip_address::list_afinet_netifas()
+        .map_err(|e| anyhow::anyhow!("Failed to enumerate network interfaces: {e}"))?;
+    pick_lan_ip(ifas)
+        .ok_or_else(|| anyhow::anyhow!("No usable LAN address found among the network interfaces"))
+}
+
 /// QuicMic — Turn any device with a microphone and a web browser into a wireless PC microphone.
 #[derive(Parser)]
 #[command(name = "quicmic", version, about)]
@@ -140,7 +255,7 @@ async fn run() -> anyhow::Result<()> {
     // ── Detect LAN IP ───────────────────────────────────────────────────
     let lan_ip: IpAddr = match &cli.ip {
         Some(ip) => parse_ip_arg(ip)?,
-        None => local_ip_address::local_ip()?,
+        None => detect_lan_ip()?,
     };
 
     // ── List audio devices ──────────────────────────────────────────────
@@ -439,8 +554,102 @@ fn pause_before_exit() {
 
 #[cfg(test)]
 mod tests {
-    use super::{noise_gate_db_to_linear, parse_ip_arg, url_host};
+    use super::{
+        is_unusable_lan_addr, lan_addr_rank, noise_gate_db_to_linear, parse_ip_arg, pick_lan_ip,
+        url_host,
+    };
     use std::net::IpAddr;
+
+    fn v4(a: u8, b: u8, c: u8, d: u8) -> IpAddr {
+        IpAddr::V4(std::net::Ipv4Addr::new(a, b, c, d))
+    }
+
+    fn v6(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn fake_ip_benchmark_range_is_unusable() {
+        // Fake-ip proxy TUNs (mihomo/Clash, sing-box, Surge, etc.) use the RFC
+        // 2544 benchmark range 198.18/15 as their default fake-ip range.
+        assert!(is_unusable_lan_addr(v4(198, 18, 0, 1)));
+        assert!(is_unusable_lan_addr(v4(198, 19, 255, 255)));
+        // Real LAN addresses stay usable.
+        assert!(!is_unusable_lan_addr(v4(192, 168, 1, 16)));
+        assert!(!is_unusable_lan_addr(v4(10, 0, 0, 5)));
+    }
+
+    #[test]
+    fn loopback_link_local_and_multicast_are_unusable() {
+        assert!(is_unusable_lan_addr(v4(127, 0, 0, 1)));
+        assert!(is_unusable_lan_addr(v4(169, 254, 10, 20)));
+        assert!(is_unusable_lan_addr(v4(224, 0, 0, 1)));
+        assert!(is_unusable_lan_addr(v6("::1")));
+        assert!(is_unusable_lan_addr(v6("fe80::1")));
+    }
+
+    #[test]
+    fn ranking_prefers_private_then_cgnat_then_public() {
+        assert!(lan_addr_rank(v4(192, 168, 1, 16)) > lan_addr_rank(v4(100, 64, 0, 2)));
+        assert!(lan_addr_rank(v4(10, 1, 1, 1)) > lan_addr_rank(v4(100, 64, 0, 2)));
+        assert!(lan_addr_rank(v4(100, 64, 0, 2)) > lan_addr_rank(v4(8, 8, 8, 8)));
+    }
+
+    #[test]
+    fn picker_skips_tun_fake_ip_and_prefers_the_real_lan() {
+        // The bug pattern: a proxy TUN adapter ("sekai") owns the fake-ip
+        // address 198.18.0.1; the real Ethernet is 192.168.1.16. The picker must
+        // return the real LAN address, never the fake one.
+        let ifas = vec![
+            ("sekai".to_string(), v4(198, 18, 0, 1)),
+            ("Ethernet".to_string(), v4(192, 168, 1, 16)),
+        ];
+        assert_eq!(pick_lan_ip(ifas), Some(v4(192, 168, 1, 16)));
+    }
+
+    #[test]
+    fn picker_deprioritizes_virtual_adapters_on_same_rank_ties() {
+        // Same rank (RFC 1918) and same family: a vEthernet (Hyper-V/WSL)
+        // holding 172.16.0.1 loses to the real Wi-Fi 192.168.1.42.
+        let ifas = vec![
+            ("Wi-Fi".to_string(), v4(192, 168, 1, 42)),
+            ("vEthernet (Default Switch)".to_string(), v4(172, 16, 0, 1)),
+        ];
+        assert_eq!(pick_lan_ip(ifas), Some(v4(192, 168, 1, 42)));
+    }
+
+    #[test]
+    fn picker_deprioritizes_virtual_adapters_regardless_of_enumeration_order() {
+        let ifas = vec![
+            ("vEthernet (WSL)".to_string(), v4(172, 20, 10, 1)),
+            ("Ethernet".to_string(), v4(192, 168, 1, 16)),
+        ];
+        assert_eq!(pick_lan_ip(ifas), Some(v4(192, 168, 1, 16)));
+    }
+
+    #[test]
+    fn picker_keeps_virtual_adapter_when_nothing_else_is_usable() {
+        let ifas = vec![("vEthernet (Default Switch)".to_string(), v4(172, 16, 0, 1))];
+        assert_eq!(pick_lan_ip(ifas), Some(v4(172, 16, 0, 1)));
+    }
+
+    #[test]
+    fn picker_returns_none_when_every_address_is_unusable() {
+        let ifas = vec![
+            ("tun".to_string(), v4(198, 18, 0, 1)),
+            ("lo".to_string(), v4(127, 0, 0, 1)),
+        ];
+        assert_eq!(pick_lan_ip(ifas), None);
+    }
+
+    #[test]
+    fn picker_falls_back_to_ipv6_when_only_v6_is_usable() {
+        let ifas = vec![
+            ("tun".to_string(), v4(198, 18, 0, 1)),
+            ("eth".to_string(), v6("fd00::1")),
+        ];
+        assert_eq!(pick_lan_ip(ifas), Some(v6("fd00::1")));
+    }
 
     #[test]
     fn parse_ip_arg_accepts_bare_and_bracketed() {
