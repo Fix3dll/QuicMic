@@ -1239,7 +1239,15 @@ async function connectWebTransport(sampleRate) {
     );
     await Promise.race([transport.ready, timeoutPromise]);
 
-    datagramWriter = transport.datagrams.writable.getWriter();
+    // Datagram writer acquisition differs by engine (MDN BCD):
+    // - Modern `createWritable()`: Safari 26.4+, Firefox 155+
+    // - Legacy `writable`: Chromium 97+, Firefox 114+
+    // Feature-detect so each engine takes the appropriate path.
+    const datagramStream = transport.datagrams;
+    const writable = typeof datagramStream.createWritable === 'function'
+        ? datagramStream.createWritable()
+        : datagramStream.writable;
+    datagramWriter = writable.getWriter();
     transportType = 'WebTransport';
     console.log('[transport] connected via WebTransport (QUIC/UDP)');
 }
