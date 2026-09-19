@@ -62,6 +62,7 @@ fn is_unusable_lan_addr(ip: IpAddr) -> bool {
         IpAddr::V6(v6) => {
             v6.is_loopback()
                 || v6.is_unspecified()
+                || v6.is_multicast()
                 // Link-local IPv6 needs a zone id to route and is explicitly out
                 // of scope for QuicMic's pairing URL.
                 || (v6.segments()[0] & 0xffc0) == 0xfe80
@@ -77,19 +78,9 @@ fn is_unusable_lan_addr(ip: IpAddr) -> bool {
 /// beats a same-rank IPv6 regardless of enumeration order.
 fn lan_addr_rank(ip: IpAddr) -> u8 {
     match ip {
-        IpAddr::V4(v4) => {
-            let o = v4.octets();
-            let rfc1918 = o[0] == 10
-                || (o[0] == 172 && (16..=31).contains(&o[1]))
-                || (o[0] == 192 && o[1] == 168);
-            if rfc1918 {
-                2
-            } else if o[0] == 100 && (64..=127).contains(&o[1]) {
-                1
-            } else {
-                0
-            }
-        }
+        IpAddr::V4(v4) if v4.is_private() => 2,
+        IpAddr::V4(v4) if v4.octets()[0] == 100 && (64..=127).contains(&v4.octets()[1]) => 1,
+        IpAddr::V4(_) => 0,
         IpAddr::V6(_) => 1,
     }
 }
@@ -101,12 +92,13 @@ fn lan_addr_rank(ip: IpAddr) -> u8 {
 /// ranked. Keep this list conservative: a false positive only demotes an
 /// equally-ranked candidate, never the only candidate.
 fn is_virtual_adapter(name: &str) -> bool {
-    const KEYWORDS: [&str; 11] = [
+    const KEYWORDS: [&str; 12] = [
         "vethernet",
         "wsl",
         "docker",
         "veth",
         "vmnet",
+        "vbox",
         "virbr",
         "tailscale",
         "zerotier",
@@ -574,6 +566,9 @@ mod tests {
         // 2544 benchmark range 198.18/15 as their default fake-ip range.
         assert!(is_unusable_lan_addr(v4(198, 18, 0, 1)));
         assert!(is_unusable_lan_addr(v4(198, 19, 255, 255)));
+        // Boundaries outside 198.18.0.0/15 are not caught by this exclusion.
+        assert!(!is_unusable_lan_addr(v4(198, 17, 255, 255)));
+        assert!(!is_unusable_lan_addr(v4(198, 20, 0, 1)));
         // Real LAN addresses stay usable.
         assert!(!is_unusable_lan_addr(v4(192, 168, 1, 16)));
         assert!(!is_unusable_lan_addr(v4(10, 0, 0, 5)));
@@ -581,18 +576,29 @@ mod tests {
 
     #[test]
     fn loopback_link_local_and_multicast_are_unusable() {
+        assert!(is_unusable_lan_addr(v4(0, 0, 0, 0))); // 0.0.0.0/8
+        assert!(is_unusable_lan_addr(v4(0, 1, 2, 3)));
         assert!(is_unusable_lan_addr(v4(127, 0, 0, 1)));
         assert!(is_unusable_lan_addr(v4(169, 254, 10, 20)));
         assert!(is_unusable_lan_addr(v4(224, 0, 0, 1)));
-        assert!(is_unusable_lan_addr(v6("::1")));
-        assert!(is_unusable_lan_addr(v6("fe80::1")));
+        assert!(is_unusable_lan_addr(v4(255, 255, 255, 255))); // reserved / broadcast
+        assert!(is_unusable_lan_addr(v6("::"))); // unspecified
+        assert!(is_unusable_lan_addr(v6("::1"))); // loopback
+        assert!(is_unusable_lan_addr(v6("fe80::1"))); // link-local
+        assert!(is_unusable_lan_addr(v6("ff02::1"))); // multicast
     }
 
     #[test]
     fn ranking_prefers_private_then_cgnat_then_public() {
-        assert!(lan_addr_rank(v4(192, 168, 1, 16)) > lan_addr_rank(v4(100, 64, 0, 2)));
-        assert!(lan_addr_rank(v4(10, 1, 1, 1)) > lan_addr_rank(v4(100, 64, 0, 2)));
-        assert!(lan_addr_rank(v4(100, 64, 0, 2)) > lan_addr_rank(v4(8, 8, 8, 8)));
+        assert_eq!(lan_addr_rank(v4(192, 168, 1, 16)), 2);
+        assert_eq!(lan_addr_rank(v4(10, 1, 1, 1)), 2);
+        assert_eq!(lan_addr_rank(v4(172, 16, 0, 1)), 2);
+        assert_eq!(lan_addr_rank(v4(172, 31, 255, 255)), 2);
+        assert_eq!(lan_addr_rank(v4(100, 64, 0, 2)), 1); // CGNAT
+        assert_eq!(lan_addr_rank(v4(100, 127, 255, 255)), 1); // CGNAT
+        assert_eq!(lan_addr_rank(v6("2001:db8::1")), 1); // IPv6
+        assert_eq!(lan_addr_rank(v4(172, 32, 0, 1)), 0); // Public
+        assert_eq!(lan_addr_rank(v4(8, 8, 8, 8)), 0); // Public
     }
 
     #[test]
@@ -616,6 +622,16 @@ mod tests {
             ("vEthernet (Default Switch)".to_string(), v4(172, 16, 0, 1)),
         ];
         assert_eq!(pick_lan_ip(ifas), Some(v4(192, 168, 1, 42)));
+
+        // VirtualBox host-only adapter also yields to real Ethernet.
+        let ifas_vbox = vec![
+            (
+                "VirtualBox Host-Only Ethernet Adapter".to_string(),
+                v4(192, 168, 56, 1),
+            ),
+            ("Ethernet".to_string(), v4(192, 168, 1, 16)),
+        ];
+        assert_eq!(pick_lan_ip(ifas_vbox), Some(v4(192, 168, 1, 16)));
     }
 
     #[test]
