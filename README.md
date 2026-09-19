@@ -62,15 +62,49 @@ QuicMic outputs to a virtual device. Install one and (optionally) pass its name 
 </details>
 
 <details>
-<summary><b>Linux</b> — PulseAudio / PipeWire null sink</summary>
+<summary><b>Linux</b> — PipeWire / PulseAudio null sink</summary>
 
-```bash
-# Create a virtual sink named "VirtualQuicMic" (QuicMic's default on Linux).
-pactl load-module module-null-sink sink_name=VirtualQuicMic \
-  sink_properties=device.description=VirtualQuicMic
-```
+1. Create the virtual microphone sink and map it to ALSA under QuicMic's default device name (**`VirtualQuicMic`**):
 
-Your apps can then use the sink's monitor as a microphone source.
+   ```bash
+   # 1. Create the virtual sink (works on both PipeWire and PulseAudio)
+   pactl load-module module-null-sink sink_name=VirtualQuicMic sink_properties=device.description=VirtualQuicMic
+
+   # 2. Expose it to ALSA/QuicMic (automatically selects PipeWire or PulseAudio)
+   if [ -f /usr/lib/*/alsa-lib/libasound_module_pcm_pipewire.so ] || [ -f /usr/lib/alsa-lib/libasound_module_pcm_pipewire.so ]; then
+       TYPE="pipewire"
+       TARGET='playback_node "VirtualQuicMic"'
+   else
+       TYPE="pulse"
+       TARGET='device "VirtualQuicMic"'
+   fi
+
+   cat << EOF > ~/.asoundrc
+   pcm.VirtualQuicMic {
+       type $TYPE
+       $TARGET
+       hint {
+           show on
+           description "VirtualQuicMic"
+       }
+   }
+   EOF
+   ```
+
+2. In your target app (Discord, Zoom, etc.), select **`Monitor of VirtualQuicMic`** (or `VirtualQuicMic`) as your microphone.
+
+3. **Persistence across reboots (optional):** The `~/.asoundrc` file persists across reboots, but the virtual sink lives in memory. To recreate it automatically whenever you log in, add it to your desktop's **Startup Applications**, or run:
+
+   ```bash
+   mkdir -p ~/.config/autostart && cat << 'EOF' > ~/.config/autostart/virtual-quicmic.desktop
+   [Desktop Entry]
+   Type=Application
+   Name=VirtualQuicMic Sink
+   Comment=Virtual microphone sink for QuicMic
+   Exec=pactl load-module module-null-sink sink_name=VirtualQuicMic sink_properties=device.description=VirtualQuicMic
+   Terminal=false
+   EOF
+   ```
 
 </details>
 
@@ -262,6 +296,18 @@ In your target app, select the **virtual device's output/monitor** as the microp
 **Choppy audio or high latency**
 
 Usually Wi-Fi congestion. Prefer a **5 GHz** network, move closer to the router, and try lowering the **Latency Recovery** slider in the in-app settings.
+
+**Audio is echoing or playing through PC speakers / TV**
+
+A virtual microphone should stay completely silent on your physical speakers:
+- **Linux:** Do not run with `--device default` or `--device pulse` (which routes audio to your active physical speakers/TV). Complete the `~/.asoundrc` step from the setup guide above so audio is isolated inside the virtual sink.
+- **Windows:** In Windows Sound Settings, open properties for `CABLE Output` (Recording tab) and ensure **"Listen to this device"** is unchecked.
+
+**Linux: ALSA error / `libasound_module_pcm_*.so` not found**
+
+QuicMic outputs via ALSA (`cpal`). If your minimal or custom distro lacks the ALSA bridge plugin for your sound server, install it:
+- **PipeWire:** `pipewire-alsa` (pre-installed on most modern distros).
+- **PulseAudio:** `libasound2-plugins` (Debian/Ubuntu/Mint), `alsa-plugins-pulseaudio` (Fedora), or `pulseaudio-alsa` (Arch).
 
 ---
 
