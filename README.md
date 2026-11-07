@@ -126,7 +126,7 @@ Requires a [Rust toolchain](https://rustup.rs/) (built and tested with **Rust 1.
 
 ```bash
 git clone https://github.com/Fix3dll/QuicMic.git
-cd quicmic
+cd QuicMic
 cargo build --release
 # binary at target/release/quicmic (quicmic.exe on Windows)
 ```
