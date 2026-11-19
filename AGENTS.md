@@ -16,57 +16,33 @@ It consists of:
 
 ## 🛠️ System Architecture & Audio Pipeline
 
-```text
-+-------------------------------------------------------------------------+
-|                         CLIENT (Mobile / Desktop Browser)               |
-|                                                                         |
-|    [ Microphone ] ---> ( AudioWorklet ) ---> [ Network Writer ]         |
-|     (mono, ~48kHz)       (worklet.js)             (app.js)              |
-+-------------------------------------+-----------------------------------+
-                                      |
-                                      v
-+-------------------------------------+-----------------------------------+
-|                            LOCAL NETWORK (LAN)                          |
-|                                                                         |
-|        /--- [ WebTransport ] (UDP/QUIC - Primary Low-Latency) ---\      |
-|       /                                                           \     |
-|      /---- [ WebSocket ]   (TCP - Secondary Fallback) -------------\    |
-+-----+---------------------------------------------------------------+---+
-      |                                                               |
-      v                                                               v
-+-----+---------------------------------------------------------------+---+
-|                    SERVER (Windows / macOS / Linux)                     |
-|                                                                         |
-|    [ wtransport Connection ]              [ axum WebSocket Connection ] |
-|               \                                      /                  |
-|                v                                    v                   |
-|              +----------------------------------------+                 |
-|              |   Decode i16 PCM into Ring Buffer      |                 |
-|              +--------------------+-------------------+                 |
-|                                   |                                     |
-|                                   v                                     |
-|              +----------------------------------------+                 |
-|              |    Ring Buffer (audio/ring_buffer)     |                 |
-|              +--------------------+-------------------+                 |
-|                                   |                                     |
-|                                   v                                     |
-|              +----------------------------------------+                 |
-|              |           CPAL Output Thread           |                 |
-|              +--------------------+-------------------+                 |
-|                                   |                                     |
-|                                   v                                     |
-|              +----------------------------------------+                 |
-|              | Catmull-Rom Cubic Resampler (Rate)     |                 |
-|              +--------------------+-------------------+                 |
-|                                   |                                     |
-|                                   v                                     |
-|              +----------------------------------------+                 |
-|              |    Channel Duplication (Mono -> Multi) |                 |
-|              +--------------------+-------------------+                 |
-|                                   |                                     |
-|                                   v                                     |
-|                      [ Virtual Device / Speakers ]                      |
-+-------------------------------------------------------------------------+
+```mermaid
+flowchart TD
+    subgraph CLIENT["Client (mobile / desktop browser)"]
+        MIC["Microphone<br/>mono, native rate (~48 kHz)"] --> WORKLET["AudioWorklet (worklet.js)<br/>noise gate · gain · Int16 frames"]
+        WORKLET --> WRITER["Network writer (app.js)<br/>sequence number + PCM"]
+    end
+
+    subgraph LAN["Local network (LAN)"]
+        WT["WebTransport<br/>UDP / QUIC datagrams · primary"]
+        WS["WebSocket<br/>TCP · fallback"]
+    end
+
+    WRITER --> WT
+    WRITER -.-> WS
+
+    subgraph SERVER["Server (Windows / macOS / Linux)"]
+        WTC["wtransport session"] --> DECODE
+        WSC["axum WebSocket"] --> DECODE
+        DECODE["Decode i16 PCM<br/>(audio::decode_into_ring)"] --> RING["Lock-free SPSC ring buffer<br/>600 ms at 192 kHz"]
+        RING --> CPAL["cpal output thread<br/>latency recovery (50–500 ms)"]
+        CPAL --> RESAMPLE["Catmull-Rom cubic resampler"]
+        RESAMPLE --> DUP["Channel duplication<br/>mono → all channels"]
+    end
+
+    WT --> WTC
+    WS -.-> WSC
+    DUP --> DEVICE["Virtual audio device / speakers"]
 ```
 
 ### 1. The Audio Path
