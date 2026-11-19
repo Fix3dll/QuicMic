@@ -312,7 +312,8 @@ pub(super) async fn handle_update_settings(
         info!(gain = clamped, "Gain updated");
     }
     if let Some(lt) = body.latency_threshold {
-        let clamped = lt.min(super::LATENCY_THRESHOLD_MAX_MS);
+        // Legacy 0 ("Off") maps to the maximum; anything else is clamped into range.
+        let clamped = crate::audio::normalize_latency_threshold(lt);
         state
             .stream
             .latency_threshold

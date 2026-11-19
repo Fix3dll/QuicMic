@@ -10,23 +10,17 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, FromSample, Sample, SampleFormat, Stream, StreamConfig};
 use tracing::{error, info, warn};
 
+use super::normalize_latency_threshold;
 use super::ring_buffer::RingBuffer;
-use super::LATENCY_THRESHOLD_MAX_MS;
 
 /// Buffer depth, in source samples, above which latency recovery trims the ring.
 ///
-/// `threshold_ms` is the user's setting; 0 (Off) falls back to the
-/// `LATENCY_THRESHOLD_MAX_MS` ceiling instead of "never": the ring is sized for
-/// 192 kHz, so at 48 kHz an unbounded Off would otherwise let lag grow to ~2.4s
-/// (the old, smaller ring capped it implicitly, by dropping audio). Values above
-/// the maximum are clamped defensively (the API/CLI already clamp them). Always
-/// strictly below the ring's capacity, so `len > limit` stays reachable.
+/// The threshold is normalized again here, defensively (the API and CLI already
+/// do it), so the output stage never sees an out-of-range or legacy-Off (0)
+/// value. Always strictly below the ring's capacity, so `len > limit` stays
+/// reachable at every source rate.
 fn recovery_limit_samples(threshold_ms: u32, active_rate: usize) -> usize {
-    let ms = match threshold_ms {
-        0 => LATENCY_THRESHOLD_MAX_MS,
-        t => t.min(LATENCY_THRESHOLD_MAX_MS),
-    };
-    ms as usize * active_rate / 1000
+    normalize_latency_threshold(threshold_ms) as usize * active_rate / 1000
 }
 
 /// Target output-buffer depth, in milliseconds. Used both to end the initial
@@ -313,8 +307,8 @@ fn open_output_stream(
                     // regardless of the source sample rate.
                     let prebuffer_samples = (PREBUFFER_MS as usize * active_rate) / 1000;
 
-                    // Latency Recovery (Hard Skip). Always armed: Off (0) uses the
-                    // LATENCY_THRESHOLD_MAX_MS ceiling (see recovery_limit_samples).
+                    // Latency Recovery (Hard Skip). Always armed; the threshold is a
+                    // 50-500ms range with no "Off" (see LATENCY_THRESHOLD_MIN_MS).
                     let threshold_ms = threshold.load(Ordering::Relaxed);
                     {
                         let threshold_samples = recovery_limit_samples(threshold_ms, active_rate);
@@ -341,18 +335,11 @@ fn open_output_stream(
                                         let before_ms = (current_len * 1000) / active_rate;
                                         let after_ms =
                                             ((current_len.saturating_sub(discarded)) * 1000) / active_rate;
-                                        if threshold_ms == 0 {
-                                            warn!(
-                                                "Latency recovery: hard skipped {} samples ({}ms -> {}ms) to catch up (recovery Off; {}ms safety ceiling)",
-                                                discarded, before_ms, after_ms, LATENCY_THRESHOLD_MAX_MS
-                                            );
-                                        } else {
-                                            warn!(
-                                                "Latency recovery: hard skipped {} samples ({}ms -> {}ms) to catch up (threshold: {}ms)",
-                                                discarded, before_ms, after_ms,
-                                                threshold_ms.min(LATENCY_THRESHOLD_MAX_MS)
-                                            );
-                                        }
+                                        warn!(
+                                            "Latency recovery: hard skipped {} samples ({}ms -> {}ms) to catch up (threshold: {}ms)",
+                                            discarded, before_ms, after_ms,
+                                            normalize_latency_threshold(threshold_ms)
+                                        );
                                     }
                                 }
                                 last_skip = Some(now);
@@ -483,14 +470,15 @@ pub fn spawn_output_supervisor(
 mod tests {
     use super::{recovery_limit_samples, write_data, ResamplerState, PREBUFFER_MS};
     use crate::audio::{
-        RingBuffer, LATENCY_THRESHOLD_MAX_MS, MAX_SAMPLE_RATE, RING_CAPACITY_SAMPLES,
+        normalize_latency_threshold, RingBuffer, LATENCY_THRESHOLD_MAX_MS,
+        LATENCY_THRESHOLD_MIN_MS, MAX_SAMPLE_RATE, RING_CAPACITY_SAMPLES,
     };
 
     /// The bug this guards against: the ring used to be sized at 48 kHz, so at
     /// 96/192 kHz a threshold could exceed what the ring can hold and recovery
-    /// silently never fired. For every accepted rate and every slider position
-    /// (Off included), the limit must be strictly below the capacity, i.e. the
-    /// `len > limit` trigger must stay reachable.
+    /// silently never fired. For every accepted rate and every possible stored
+    /// value (legacy 0 included), the limit must be strictly below the capacity,
+    /// i.e. the `len > limit` trigger must stay reachable.
     #[test]
     fn recovery_limit_is_reachable_at_every_rate_and_threshold() {
         let ring = RingBuffer::new(RING_CAPACITY_SAMPLES);
@@ -515,31 +503,36 @@ mod tests {
     }
 
     #[test]
-    fn recovery_limit_is_time_based_and_off_uses_the_ceiling() {
+    fn recovery_limit_is_time_based() {
         // The same setting means the same time at any rate.
         assert_eq!(recovery_limit_samples(150, 48_000), 7_200);
         assert_eq!(recovery_limit_samples(150, 192_000), 28_800);
         assert_eq!(recovery_limit_samples(150, 44_100), 6_615);
-        // Off (0) is the maximum threshold, not "unbounded".
+    }
+
+    #[test]
+    fn threshold_normalization_maps_legacy_off_and_clamps() {
+        // Legacy "Off" means "intervene as little as possible": the maximum.
+        assert_eq!(normalize_latency_threshold(0), LATENCY_THRESHOLD_MAX_MS);
+        // Below the minimum (the old slider allowed 10-40ms) is raised to it.
+        assert_eq!(normalize_latency_threshold(10), LATENCY_THRESHOLD_MIN_MS);
+        assert_eq!(normalize_latency_threshold(49), LATENCY_THRESHOLD_MIN_MS);
+        // In range passes through; above the maximum is clamped to it.
+        assert_eq!(normalize_latency_threshold(150), 150);
         assert_eq!(
-            recovery_limit_samples(0, 48_000),
-            recovery_limit_samples(LATENCY_THRESHOLD_MAX_MS, 48_000)
-        );
-        // Out-of-range values are clamped to the maximum.
-        assert_eq!(
-            recovery_limit_samples(10_000, 96_000),
-            recovery_limit_samples(LATENCY_THRESHOLD_MAX_MS, 96_000)
+            normalize_latency_threshold(10_000),
+            LATENCY_THRESHOLD_MAX_MS
         );
     }
 
     #[test]
-    fn skip_target_is_below_default_and_off_limits() {
-        // A skip trims down to the prebuffer depth; that target must sit below the
-        // default and Off limits at every rate, or a skip could not lower latency.
-        for rate in [44_100, 48_000, 192_000] {
+    fn skip_target_is_below_the_minimum_limit() {
+        // A skip trims down to the prebuffer depth. That target must sit below even
+        // the smallest limit at every rate, or a skip could not lower latency (and
+        // the limit would be crossed in steady state, ticking every cooldown).
+        for rate in [44_100, 48_000, 96_000, MAX_SAMPLE_RATE as usize] {
             let prebuffer = PREBUFFER_MS as usize * rate / 1000;
-            assert!(prebuffer < recovery_limit_samples(150, rate));
-            assert!(prebuffer < recovery_limit_samples(0, rate));
+            assert!(prebuffer < recovery_limit_samples(LATENCY_THRESHOLD_MIN_MS, rate));
         }
     }
 

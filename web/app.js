@@ -257,13 +257,12 @@ async function init() {
     });
 
     lrSlider.addEventListener('input', () => {
-        const val = parseInt(lrSlider.value);
-        lrValue.textContent = val === 0 ? 'Off' : `${val} ms`;
+        lrValue.textContent = `${parseInt(lrSlider.value)} ms`;
     });
     lrSlider.addEventListener('change', updateServerSettings);
     lrReset.addEventListener('click', () => {
-        lrSlider.value = 150;
-        lrValue.textContent = '150 ms';
+        lrSlider.value = LATENCY_THRESHOLD_DEFAULT_MS;
+        lrValue.textContent = `${LATENCY_THRESHOLD_DEFAULT_MS} ms`;
         updateSliderFill(lrSlider);
         updateServerSettings();
     });
@@ -527,6 +526,22 @@ function dbToNoiseGate(db) {
     return db === -100 ? 0.0 : Math.pow(10, db / 20);
 }
 
+// Latency recovery is a 50–500 ms range with no "Off" (mirrors the server's
+// audio::normalize_latency_threshold). A finite buffer always sheds audio once
+// full, so "Off" was only ever a hidden ceiling; 500 ms is its explicit form.
+// Below 50 ms the limit sits inside the normal buffer depth and would trim a few
+// ms every cooldown (an audible tick). Settings saved by older versions are
+// mapped: "Off" (0) -> 500 ms (its closest meaning), 10–40 ms -> 50 ms.
+const LATENCY_THRESHOLD_MIN_MS = 50;
+const LATENCY_THRESHOLD_MAX_MS = 500;
+const LATENCY_THRESHOLD_DEFAULT_MS = 150;
+
+function normalizeLatencyThreshold(ms) {
+    if (Number.isNaN(ms)) return LATENCY_THRESHOLD_DEFAULT_MS;
+    if (ms === 0) return LATENCY_THRESHOLD_MAX_MS;
+    return Math.max(LATENCY_THRESHOLD_MIN_MS, Math.min(LATENCY_THRESHOLD_MAX_MS, ms));
+}
+
 // Gain is stored/sent as a linear amplitude multiplier but shown on the slider as
 // a *perceived loudness* percentage: 200% sounds twice as loud as 100%, 50% half
 // as loud. Uses the psychoacoustic rule of thumb that +10 dB is heard as a
@@ -584,9 +599,9 @@ function applySettingsToUI(s) {
         updateSliderFill(gainSlider);
     }
     if (s.latency_threshold !== undefined) {
-        const lt = parseInt(s.latency_threshold);
+        const lt = normalizeLatencyThreshold(parseInt(s.latency_threshold));
         lrSlider.value = lt;
-        lrValue.textContent = lt === 0 ? 'Off' : `${lt} ms`;
+        lrValue.textContent = `${lt} ms`;
         updateSliderFill(lrSlider);
     }
 }

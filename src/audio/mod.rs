@@ -17,11 +17,30 @@ pub use ring_buffer::RingBuffer;
 /// Maximum sample rate accepted from a client; anything higher is ignored.
 pub const MAX_SAMPLE_RATE: u32 = 192_000;
 
-/// Largest latency-recovery threshold, in milliseconds (the web UI slider's top).
-/// It is also the ceiling the output stage enforces when recovery is set to Off
-/// (0), so the buffer can never grow unbounded. Owned here because the output
-/// stage enforces it; the API/CLI clamp uses it as `server::LATENCY_THRESHOLD_MAX_MS`.
+/// Latency-recovery threshold range, in milliseconds (the web UI slider's ends).
+/// Owned here because the output stage enforces it; the API and CLI normalize
+/// through `normalize_latency_threshold`.
+///
+/// There is deliberately no "Off": a finite ring has to shed audio somewhere once
+/// it is full, so "off" could only ever mean a hidden, rate-dependent ceiling
+/// reached by dropping (the old behaviour). The maximum is the explicit form of
+/// it, a clean skip only in extreme cases. The minimum stays above the steady
+/// buffer depth (the 30ms prebuffer plus packet/callback jitter, ~30-45ms): a
+/// lower threshold is crossed in normal operation and would trim a few ms every
+/// cooldown, an audible periodic tick.
+pub const LATENCY_THRESHOLD_MIN_MS: u32 = 50;
 pub const LATENCY_THRESHOLD_MAX_MS: u32 = 500;
+
+/// Map any stored/requested threshold onto the valid range. `0` is the legacy
+/// "Off" (saved settings, `--latency-threshold 0` in scripts) and maps to the
+/// maximum, its closest meaning (intervene as little as possible), not the
+/// minimum. Anything else is clamped into range.
+pub fn normalize_latency_threshold(ms: u32) -> u32 {
+    match ms {
+        0 => LATENCY_THRESHOLD_MAX_MS,
+        t => t.clamp(LATENCY_THRESHOLD_MIN_MS, LATENCY_THRESHOLD_MAX_MS),
+    }
+}
 
 /// Ring-buffer capacity, in milliseconds of audio at `MAX_SAMPLE_RATE`. The ring
 /// is allocated once at startup and cannot be resized while the network task and

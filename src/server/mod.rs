@@ -41,8 +41,9 @@ pub(crate) const NOISE_GATE_MAX: f32 = 1.0;
 /// (+16 dB); `GAIN_MAX` leaves a little headroom above the slider's top.
 pub(crate) const GAIN_MIN: f32 = 0.1;
 pub(crate) const GAIN_MAX: f32 = 6.3;
-/// Defined by the audio output stage, which enforces it (also as the Off ceiling).
-pub(crate) const LATENCY_THRESHOLD_MAX_MS: u32 = crate::audio::LATENCY_THRESHOLD_MAX_MS;
+// The latency-recovery range (50-500ms) is owned by the audio output stage, which
+// enforces it: see `audio::LATENCY_THRESHOLD_{MIN,MAX}_MS` and
+// `audio::normalize_latency_threshold`, used by the API and the CLI alike.
 
 /// Constant-time byte-slice equality, so response timing does not reveal how many
 /// leading bytes of a PIN or session token matched. Returns `false` immediately
@@ -176,11 +177,8 @@ pub async fn run_https_server(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        build_router, AppState, PairingThrottle, StreamState, GAIN_MAX, LATENCY_THRESHOLD_MAX_MS,
-        NOISE_GATE_MAX,
-    };
-    use crate::audio::RingBuffer;
+    use super::{build_router, AppState, PairingThrottle, StreamState, GAIN_MAX, NOISE_GATE_MAX};
+    use crate::audio::{RingBuffer, LATENCY_THRESHOLD_MAX_MS, LATENCY_THRESHOLD_MIN_MS};
     use crate::tls::TlsIdentity;
     use axum::body::Body;
     use axum::extract::ConnectInfo;
@@ -365,6 +363,34 @@ mod tests {
             LATENCY_THRESHOLD_MAX_MS as u64
         );
         assert_eq!(json["noise_gate"].as_f64().unwrap() as f32, NOISE_GATE_MAX);
+    }
+
+    #[tokio::test]
+    async fn latency_threshold_maps_legacy_off_and_raises_low_values() {
+        let state = test_state();
+        *state.stream.session_token.lock() = Some("tok".to_string());
+        let app = build_router(state);
+        // (sent, stored): legacy "Off" (0) is the maximum, not the minimum; values
+        // the old slider allowed below the new minimum are raised to it.
+        for (sent, stored) in [
+            (0, LATENCY_THRESHOLD_MAX_MS),
+            (10, LATENCY_THRESHOLD_MIN_MS),
+            (150, 150),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(post(
+                    "/api/settings",
+                    json!({ "token": "tok", "latency_threshold": sent }),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(
+                body_json(resp).await["latency_threshold"].as_u64().unwrap(),
+                stored as u64,
+                "latency_threshold {sent} must be stored as {stored}"
+            );
+        }
     }
 
     #[tokio::test]

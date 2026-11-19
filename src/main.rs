@@ -179,10 +179,10 @@ struct Cli {
     #[arg(long, default_value = "1.0")]
     gain: f32,
 
-    /// Initial latency-recovery threshold in milliseconds (0-500; 0 = off, which
-    /// still keeps a 500ms safety ceiling). When the output buffer grows past
-    /// this, the oldest audio is skipped to catch up. Can be adjusted at runtime
-    /// via the web UI.
+    /// Initial latency-recovery threshold in milliseconds (50-500; lower = less
+    /// delay, higher = fewer skips). When the output buffer grows past this, the
+    /// oldest audio is skipped to catch up. A legacy `0` ("off") means 500.
+    /// Can be adjusted at runtime via the web UI.
     #[arg(long, default_value = "150")]
     latency_threshold: u32,
 
@@ -272,9 +272,9 @@ async fn run() -> anyhow::Result<()> {
     let gain = Arc::new(AtomicU32::new(
         cli.gain.clamp(server::GAIN_MIN, server::GAIN_MAX).to_bits(),
     ));
-    let latency_threshold = Arc::new(AtomicU32::new(
-        cli.latency_threshold.min(server::LATENCY_THRESHOLD_MAX_MS),
-    ));
+    let latency_threshold = Arc::new(AtomicU32::new(audio::normalize_latency_threshold(
+        cli.latency_threshold,
+    )));
     let packets_received = Arc::new(AtomicU64::new(0));
     let packets_lost = Arc::new(AtomicU64::new(0));
     let source_sample_rate = Arc::new(AtomicU32::new(48000));
