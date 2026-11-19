@@ -11,6 +11,23 @@ use cpal::{Device, FromSample, Sample, SampleFormat, Stream, StreamConfig};
 use tracing::{error, info, warn};
 
 use super::ring_buffer::RingBuffer;
+use super::LATENCY_THRESHOLD_MAX_MS;
+
+/// Buffer depth, in source samples, above which latency recovery trims the ring.
+///
+/// `threshold_ms` is the user's setting; 0 (Off) falls back to the
+/// `LATENCY_THRESHOLD_MAX_MS` ceiling instead of "never": the ring is sized for
+/// 192 kHz, so at 48 kHz an unbounded Off would otherwise let lag grow to ~2.4s
+/// (the old, smaller ring capped it implicitly, by dropping audio). Values above
+/// the maximum are clamped defensively (the API/CLI already clamp them). Always
+/// strictly below the ring's capacity, so `len > limit` stays reachable.
+fn recovery_limit_samples(threshold_ms: u32, active_rate: usize) -> usize {
+    let ms = match threshold_ms {
+        0 => LATENCY_THRESHOLD_MAX_MS,
+        t => t.min(LATENCY_THRESHOLD_MAX_MS),
+    };
+    ms as usize * active_rate / 1000
+}
 
 /// Target output-buffer depth, in milliseconds. Used both to end the initial
 /// prebuffering phase and as the depth that the latency-recovery hard-skip trims
@@ -24,6 +41,10 @@ const PREBUFFER_MS: u32 = 30;
 /// the ring's per-sample atomic synchronization (a real win on weak-memory-model
 /// CPUs like ARM/Apple Silicon; on x86 the atomics are plain loads/stores).
 const RESAMPLE_CHUNK: usize = 64;
+
+/// Minimum spacing between two latency-recovery skips, so a buffer hovering
+/// around the limit is not trimmed over and over (audible stutter).
+const SKIP_COOLDOWN: Duration = Duration::from_secs(3);
 
 // ---------------------------------------------------------------------------
 // Output device management
@@ -277,7 +298,12 @@ fn open_output_stream(
             let threshold = latency_threshold.clone();
             let err_tx = err_tx.clone();
             let mut resampler = ResamplerState::new();
-            let mut last_skip = std::time::Instant::now();
+            // No skip yet on this stream. The cooldown only spaces out *repeated*
+            // skips; it must not delay the first one. Starting it at build time
+            // would, after the supervisor rebuilds a lost device, play whatever
+            // piled up in the ring during the outage (up to the ring capacity)
+            // for a full cooldown before trimming it.
+            let mut last_skip: Option<std::time::Instant> = None;
             device.build_output_stream(
                 config,
                 move |data: &mut [$T], _: &cpal::OutputCallbackInfo| {
@@ -287,17 +313,18 @@ fn open_output_stream(
                     // regardless of the source sample rate.
                     let prebuffer_samples = (PREBUFFER_MS as usize * active_rate) / 1000;
 
-                    // Latency Recovery (Hard Skip)
-                    let limit_ms = threshold.load(Ordering::Relaxed) as usize;
-                    if limit_ms > 0 {
-                        let threshold_samples = (limit_ms * active_rate) / 1000;
+                    // Latency Recovery (Hard Skip). Always armed: Off (0) uses the
+                    // LATENCY_THRESHOLD_MAX_MS ceiling (see recovery_limit_samples).
+                    let threshold_ms = threshold.load(Ordering::Relaxed);
+                    {
+                        let threshold_samples = recovery_limit_samples(threshold_ms, active_rate);
                         let current_len = ring.len();
 
                         // Only read the clock once the buffer has actually grown
                         // past the threshold (the rare case), not every callback.
                         if current_len > threshold_samples {
                             let now = std::time::Instant::now();
-                            if now.duration_since(last_skip).as_secs() >= 3 {
+                            if last_skip.is_none_or(|t| now.duration_since(t) >= SKIP_COOLDOWN) {
                                 let to_discard = current_len.saturating_sub(prebuffer_samples); // trim down to the prebuffer depth
                                 if to_discard > 0 {
                                     let mut discard_buf = [0i16; 256];
@@ -314,13 +341,21 @@ fn open_output_stream(
                                         let before_ms = (current_len * 1000) / active_rate;
                                         let after_ms =
                                             ((current_len.saturating_sub(discarded)) * 1000) / active_rate;
-                                        warn!(
-                                            "Latency recovery: hard skipped {} samples ({}ms -> {}ms) to catch up (threshold: {}ms)",
-                                            discarded, before_ms, after_ms, limit_ms
-                                        );
+                                        if threshold_ms == 0 {
+                                            warn!(
+                                                "Latency recovery: hard skipped {} samples ({}ms -> {}ms) to catch up (recovery Off; {}ms safety ceiling)",
+                                                discarded, before_ms, after_ms, LATENCY_THRESHOLD_MAX_MS
+                                            );
+                                        } else {
+                                            warn!(
+                                                "Latency recovery: hard skipped {} samples ({}ms -> {}ms) to catch up (threshold: {}ms)",
+                                                discarded, before_ms, after_ms,
+                                                threshold_ms.min(LATENCY_THRESHOLD_MAX_MS)
+                                            );
+                                        }
                                     }
                                 }
-                                last_skip = now;
+                                last_skip = Some(now);
                             }
                         }
                     }
@@ -446,8 +481,67 @@ pub fn spawn_output_supervisor(
 
 #[cfg(test)]
 mod tests {
-    use super::{write_data, ResamplerState};
-    use crate::audio::RingBuffer;
+    use super::{recovery_limit_samples, write_data, ResamplerState, PREBUFFER_MS};
+    use crate::audio::{
+        RingBuffer, LATENCY_THRESHOLD_MAX_MS, MAX_SAMPLE_RATE, RING_CAPACITY_SAMPLES,
+    };
+
+    /// The bug this guards against: the ring used to be sized at 48 kHz, so at
+    /// 96/192 kHz a threshold could exceed what the ring can hold and recovery
+    /// silently never fired. For every accepted rate and every slider position
+    /// (Off included), the limit must be strictly below the capacity, i.e. the
+    /// `len > limit` trigger must stay reachable.
+    #[test]
+    fn recovery_limit_is_reachable_at_every_rate_and_threshold() {
+        let ring = RingBuffer::new(RING_CAPACITY_SAMPLES);
+        for rate in [
+            8_000,
+            44_100,
+            48_000,
+            88_200,
+            96_000,
+            176_400,
+            MAX_SAMPLE_RATE as usize,
+        ] {
+            for ms in (0..=LATENCY_THRESHOLD_MAX_MS).step_by(10) {
+                let limit = recovery_limit_samples(ms, rate);
+                assert!(
+                    limit < ring.capacity(),
+                    "unreachable recovery: {ms}ms at {rate} Hz -> limit {limit} >= capacity {}",
+                    ring.capacity()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn recovery_limit_is_time_based_and_off_uses_the_ceiling() {
+        // The same setting means the same time at any rate.
+        assert_eq!(recovery_limit_samples(150, 48_000), 7_200);
+        assert_eq!(recovery_limit_samples(150, 192_000), 28_800);
+        assert_eq!(recovery_limit_samples(150, 44_100), 6_615);
+        // Off (0) is the maximum threshold, not "unbounded".
+        assert_eq!(
+            recovery_limit_samples(0, 48_000),
+            recovery_limit_samples(LATENCY_THRESHOLD_MAX_MS, 48_000)
+        );
+        // Out-of-range values are clamped to the maximum.
+        assert_eq!(
+            recovery_limit_samples(10_000, 96_000),
+            recovery_limit_samples(LATENCY_THRESHOLD_MAX_MS, 96_000)
+        );
+    }
+
+    #[test]
+    fn skip_target_is_below_default_and_off_limits() {
+        // A skip trims down to the prebuffer depth; that target must sit below the
+        // default and Off limits at every rate, or a skip could not lower latency.
+        for rate in [44_100, 48_000, 192_000] {
+            let prebuffer = PREBUFFER_MS as usize * rate / 1000;
+            assert!(prebuffer < recovery_limit_samples(150, rate));
+            assert!(prebuffer < recovery_limit_samples(0, rate));
+        }
+    }
 
     #[test]
     fn resampler_stays_silent_while_prebuffering() {

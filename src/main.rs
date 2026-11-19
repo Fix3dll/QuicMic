@@ -11,14 +11,6 @@ use clap::Parser;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
-/// Ring-buffer depth, sized at a nominal 48 kHz (the rate browsers capture at).
-/// The ring is allocated once at startup and never resized, so its capacity is
-/// fixed at this nominal rate. ~500ms comfortably absorbs Wi-Fi jitter; actual
-/// latency is governed by PREBUFFER_MS + the latency-recovery threshold, not this
-/// ceiling.
-const RING_BUFFER_MS: usize = 500;
-const RING_BUFFER_SAMPLES: usize = 48_000 * RING_BUFFER_MS / 1000;
-
 /// After Ctrl+C the HTTP API keeps replying 503 for this long so a streaming
 /// client's ~1s liveness poll reliably observes the shutdown before the process
 /// exits. The transport close event is unreliable/late on iOS Safari, so this
@@ -187,9 +179,10 @@ struct Cli {
     #[arg(long, default_value = "1.0")]
     gain: f32,
 
-    /// Initial latency-recovery threshold in milliseconds (0 = disabled).
-    /// When the output buffer grows past this, the oldest audio is skipped to
-    /// catch up. Can be adjusted at runtime via the web UI.
+    /// Initial latency-recovery threshold in milliseconds (0-500; 0 = off, which
+    /// still keeps a 500ms safety ceiling). When the output buffer grows past
+    /// this, the oldest audio is skipped to catch up. Can be adjusted at runtime
+    /// via the web UI.
     #[arg(long, default_value = "150")]
     latency_threshold: u32,
 
@@ -259,7 +252,10 @@ async fn run() -> anyhow::Result<()> {
     }
 
     // ── Create shared ring buffer ───────────────────────────────────────
-    let ring = Arc::new(audio::RingBuffer::new(RING_BUFFER_SAMPLES));
+    // Sized for the highest accepted source rate (see audio::RING_CAPACITY_MS);
+    // actual latency is governed by the prebuffer + latency-recovery limit, which
+    // are applied in time, not by this capacity.
+    let ring = Arc::new(audio::RingBuffer::new(audio::RING_CAPACITY_SAMPLES));
 
     // ── Shared atomics ──────────────────────────────────────────────────
     let is_connected = Arc::new(AtomicBool::new(false));

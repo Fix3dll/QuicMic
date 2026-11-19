@@ -41,7 +41,8 @@ pub(crate) const NOISE_GATE_MAX: f32 = 1.0;
 /// (+16 dB); `GAIN_MAX` leaves a little headroom above the slider's top.
 pub(crate) const GAIN_MIN: f32 = 0.1;
 pub(crate) const GAIN_MAX: f32 = 6.3;
-pub(crate) const LATENCY_THRESHOLD_MAX_MS: u32 = 500;
+/// Defined by the audio output stage, which enforces it (also as the Off ceiling).
+pub(crate) const LATENCY_THRESHOLD_MAX_MS: u32 = crate::audio::LATENCY_THRESHOLD_MAX_MS;
 
 /// Constant-time byte-slice equality, so response timing does not reveal how many
 /// leading bytes of a PIN or session token matched. Returns `false` immediately
