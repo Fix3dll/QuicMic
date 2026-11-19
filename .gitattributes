@@ -1,0 +1,6 @@
+# Store text files with LF line endings and check them out as LF on every
+# platform. This overrides a machine-wide `core.autocrlf=true` (the Git for
+# Windows default), so Windows Git and WSL/Linux Git agree on the working tree
+# and a CRLF checkout can never surface as a whole-file phantom modification.
+# Binary files (images, icons) are detected automatically and left untouched.
+* text=auto eol=lf
