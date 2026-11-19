@@ -11,10 +11,14 @@
 
 # Only consider the platforms we actually ship a binary for, so platform-specific
 # dependencies that are never compiled into a release (e.g. cpal's Android/wasm
-# backends) don't show up in the attribution.
+# backends) don't show up in the attribution. Keep this in sync with `targets` in
+# dist-workspace.toml: arm64 Windows, for one, pulls in crates (e.g. `ring`'s
+# `windows-sys`) that no x86_64 build compiles.
 targets = [
     "x86_64-pc-windows-msvc",
+    "aarch64-pc-windows-msvc",
     "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
     "x86_64-apple-darwin",
     "aarch64-apple-darwin",
 ]
