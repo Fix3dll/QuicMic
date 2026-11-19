@@ -23,6 +23,14 @@ body = """
 {% else -%}
     ## [Unreleased]
 {% endif -%}
+{#- Release notes (e.g. "### Upgrade notes"), stored as the annotated tag's
+    message so they survive every full regeneration: pass them as
+    --with-tag-message when generating, then tag with
+    `git tag -a <tag> --cleanup=verbatim -F <notes>` (verbatim keeps "#" lines).
+    Lightweight tags have no message, so releases without notes are unchanged. -#}
+{%- if message %}
+{{ message | trim }}
+{% endif -%}
 
 {% for group, commits in commits | group_by(attribute="group") %}
     ### {{ group | upper_first }}
