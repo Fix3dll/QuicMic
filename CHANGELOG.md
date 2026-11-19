@@ -5,12 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.5] - 2026-11-19
+
+### Upgrade notes
+
+- **Customized `web/` folder:** `index.html`, `app.js`, `style.css` and `worklet.js` changed together in this release. If you override any of them with a local `web/` folder next to the executable, update all of them (or remove the folder); mixing old and new files can make the gain extremely quiet.
+- **Gain** is now shown as perceived loudness (25–300%). Your saved setting carries over (1.0x → 100%, 3.0x → 195%).
+
+### Security
+
+- Dependency update fixes RustSec advisories in the QUIC stack used by WebTransport (quinn-proto, quinn-udp). Upgrading is recommended.
+
+### Changed
+- Convert architecture diagram to Mermaid by @Fix3dll
+- Render annotated tag messages as release notes by @Fix3dll
+- Replace latency-recovery Off with a 50-500 ms range by @Fix3dll
+- Perceived-loudness gain slider with clip warning by @Fix3dll
+- Include arm64 Windows and Linux targets by @Fix3dll
+- Enforce LF line endings via .gitattributes by @Fix3dll
+- Bump dependencies in Cargo.lock by @Fix3dll
+- Bump rustls from 0.23.45 to 0.23.46 by @dependabot[bot] in [#4](https://github.com/Fix3dll/QuicMic/pull/4)
+
+### Fixed
+- Size ring buffer for the max source sample rate by @Fix3dll
+- Log client address instead of token on rejected sessions by @Fix3dll
+- Fix clone directory case in README by @Bill-LTL in [#5](https://github.com/Fix3dll/QuicMic/pull/5)
+
+### New Contributors
+* @Bill-LTL made their first contribution in [#5](https://github.com/Fix3dll/QuicMic/pull/5)
+* @dependabot[bot] made their first contribution in [#4](https://github.com/Fix3dll/QuicMic/pull/4)
+
 ## [0.2.4] - 2026-09-19
 
 ### Added
 - Add Linux setup with autostart and separate troubleshooting items by @Fix3dll
 
 ### Changed
+- Release v0.2.4 by @Fix3dll
 - Bump dependencies in Cargo.lock by @Fix3dll
 - Polish lan detection and add vbox adapter filter by @Fix3dll
 - Merge pull request #2 from hu3rror/fix/safari-wt by @hu3rror in [#2](https://github.com/Fix3dll/QuicMic/pull/2)
@@ -56,6 +87,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### New Contributors
 * @Fix3dll made their first contribution
 
+[0.2.5]: https://github.com/Fix3dll/QuicMic/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/Fix3dll/QuicMic/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/Fix3dll/QuicMic/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/Fix3dll/QuicMic/compare/v0.2.1...v0.2.2
