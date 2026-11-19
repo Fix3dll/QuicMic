@@ -195,7 +195,16 @@ async fn handle_session(
         }
     };
     if !authorized {
-        warn!(path = %path, "Rejected WebTransport session: invalid or missing token");
+        // Never log the path itself: its first segment is the attempted token, and
+        // client-supplied strings are not echoed into the log. The server-observed
+        // address says *who* tried, and the validated sample rate (a number, absent
+        // if missing/invalid) hints *what* tried: a real (e.g. stale) QuicMic tab
+        // always sends `sr`, a scanner typically does not.
+        warn!(
+            authority = %session_request.remote_address(),
+            sample_rate = parse_sample_rate(&path),
+            "Rejected WebTransport session: invalid or missing token"
+        );
         // Reply 403 and finish the session, tearing the connection down immediately
         // instead of letting an unauthenticated session linger until the QUIC idle
         // timeout.

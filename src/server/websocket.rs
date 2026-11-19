@@ -1,10 +1,11 @@
 //! WebSocket fallback transport (TCP). Rides on the HTTP server via the
 //! `/ws` upgrade route; carries the same PCM packets as WebTransport.
 
+use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Query, State};
+use axum::extract::{ConnectInfo, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
@@ -25,36 +26,42 @@ pub(super) struct WsQuery {
 pub(super) async fn handle_ws_upgrade(
     ws: WebSocketUpgrade,
     Query(query): Query<WsQuery>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     State(state): State<AppState>,
 ) -> Response {
-    // Validate token
-    let provided_token = match query.token {
-        Some(t) => t,
-        None => {
-            return (StatusCode::UNAUTHORIZED, "Missing token").into_response();
-        }
-    };
+    // Parsed leniently: a non-numeric or out-of-range `sr` is ignored rather than
+    // rejecting the whole upgrade (mirrors webtransport::parse_sample_rate).
+    let sample_rate = query
+        .sr
+        .as_deref()
+        .and_then(|s| s.parse::<u32>().ok())
+        .filter(|&sr| sr > 0 && sr <= MAX_SAMPLE_RATE);
 
-    {
+    // Validate token (a missing one is rejected exactly like a wrong one).
+    let authorized = {
         let guard = state.stream.session_token.lock();
-        match guard.as_ref() {
-            Some(expected)
-                if super::constant_time_eq(expected.as_bytes(), provided_token.as_bytes()) => {}
-            _ => {
-                warn!("WebSocket rejected: invalid token");
-                return (StatusCode::UNAUTHORIZED, "Invalid token").into_response();
-            }
-        }
+        matches!(
+            (guard.as_ref(), query.token.as_deref()),
+            (Some(expected), Some(provided))
+                if super::constant_time_eq(expected.as_bytes(), provided.as_bytes())
+        )
+    };
+    if !authorized {
+        // Same shape as the WebTransport rejection: the server-observed address
+        // and the validated sample rate (absent if missing/invalid), never the
+        // attempted token.
+        warn!(
+            authority = %addr,
+            sample_rate,
+            "WebSocket rejected: invalid or missing token"
+        );
+        return (StatusCode::UNAUTHORIZED, "Invalid or missing token").into_response();
     }
 
-    // Update source sample rate if the client provided a valid one. Parsed
-    // leniently: a non-numeric or out-of-range `sr` is ignored rather than
-    // rejecting the whole upgrade (mirrors webtransport::parse_sample_rate).
-    if let Some(sr) = query.sr.as_deref().and_then(|s| s.parse::<u32>().ok()) {
-        if sr > 0 && sr <= MAX_SAMPLE_RATE {
-            state.stream.source_sample_rate.store(sr, Ordering::Relaxed);
-            info!(sample_rate = sr, "Client sample rate updated (WebSocket)");
-        }
+    // Only an authenticated client may change the shared source sample rate.
+    if let Some(sr) = sample_rate {
+        state.stream.source_sample_rate.store(sr, Ordering::Relaxed);
+        info!(sample_rate = sr, "Client sample rate updated (WebSocket)");
     }
 
     // Cancel any existing stream to initiate instant handover, then subscribe to
