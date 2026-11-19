@@ -181,8 +181,9 @@ struct Cli {
     #[arg(long, default_value = "-50", allow_hyphen_values = true)]
     noise_gate: f32,
 
-    /// Initial audio gain multiplier (1.0 = unity, e.g. 1.5).
-    /// Can be adjusted at runtime via the web UI.
+    /// Initial audio gain as a linear multiplier (1.0 = unity, range 0.1–6.3).
+    /// The web UI shows it as perceived loudness (e.g. 2.0 ≈ 150%, 3.16 = 200%)
+    /// and can adjust it at runtime.
     #[arg(long, default_value = "1.0")]
     gain: f32,
 

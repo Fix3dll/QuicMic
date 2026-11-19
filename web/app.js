@@ -46,6 +46,7 @@ let lastVuUpdateTime = 0;
 let wakeLock = null;         // Screen Wake Lock sentinel (held during Eco Mode).
 let ecoDimTimer = null;      // Timer that fades the Eco Mode controls to black.
 let voiceTimeout = null;     // Debounce for the voice-activity glow on the mic ring.
+let clipTimeout = null;      // Hold timer for the red clipping flash on the mic ring.
 
 // Auto-reconnect
 let reconnectAttempts = 0;
@@ -240,16 +241,18 @@ async function init() {
     ngReset.addEventListener('click', () => {
         ngSlider.value = -50;
         ngValue.textContent = '-50 dB';
+        updateSliderFill(ngSlider);
         updateServerSettings();
     });
 
     gainSlider.addEventListener('input', () => {
-        gainValue.textContent = parseFloat(gainSlider.value).toFixed(1) + 'x';
+        gainValue.textContent = `${parseInt(gainSlider.value)}%`;
     });
     gainSlider.addEventListener('change', updateServerSettings);
     gainReset.addEventListener('click', () => {
-        gainSlider.value = 1.0;
-        gainValue.textContent = '1.0x';
+        gainSlider.value = GAIN_PERCENT_DEFAULT;
+        gainValue.textContent = `${GAIN_PERCENT_DEFAULT}%`;
+        updateSliderFill(gainSlider);
         updateServerSettings();
     });
 
@@ -261,8 +264,17 @@ async function init() {
     lrReset.addEventListener('click', () => {
         lrSlider.value = 150;
         lrValue.textContent = '150 ms';
+        updateSliderFill(lrSlider);
         updateServerSettings();
     });
+
+    // Every slider paints its filled portion from `--fill` (see style.css); keep it
+    // in step while dragging. Programmatic value changes call updateSliderFill
+    // themselves, since they don't fire `input`.
+    for (const slider of [ngSlider, gainSlider, lrSlider]) {
+        slider.addEventListener('input', () => updateSliderFill(slider));
+        updateSliderFill(slider);
+    }
 
     // Load saved settings from localStorage
     loadSettings();
@@ -489,7 +501,7 @@ function toggleMute() {
         statusBadge.className = 'status-badge muted';
         micBtn.classList.add('muted');
         micRing.classList.add('muted');
-        micRing.classList.remove('voice');
+        micRing.classList.remove('voice', 'clip');
         micHint.textContent = 'Long press to unmute';
         vuBar.style.width = '0%';
         vuLevel.textContent = '0%';
@@ -515,6 +527,43 @@ function dbToNoiseGate(db) {
     return db === -100 ? 0.0 : Math.pow(10, db / 20);
 }
 
+// Gain is stored/sent as a linear amplitude multiplier but shown on the slider as
+// a *perceived loudness* percentage: 200% sounds twice as loud as 100%, 50% half
+// as loud. Uses the psychoacoustic rule of thumb that +10 dB is heard as a
+// doubling of loudness, so amplitude = (percent / 100) ^ (log2(10) / 2) ≈ ^1.66.
+// That makes every slider step an equal audible change; the old linear 0.2x–3.0x
+// slider spent most of its travel on the top +3.5 dB. The range maps to roughly
+// 0.1x (25%, -20 dB) .. 6.2x (300%, +16 dB), inside the server's GAIN_MIN/GAIN_MAX.
+// Above ~100% loud input can clip; the mic ring flashes red when it does.
+const GAIN_PERCENT_MIN = 25;
+const GAIN_PERCENT_MAX = 300;
+const GAIN_PERCENT_STEP = 5;
+const GAIN_PERCENT_DEFAULT = 100;
+const GAIN_EXPONENT = Math.log2(10) / 2;
+
+function percentToGain(percent) {
+    return Math.pow(percent / 100, GAIN_EXPONENT);
+}
+/** Inverse of percentToGain, snapped to the slider's step and range. */
+function gainToPercent(gain) {
+    if (!(gain > 0)) return GAIN_PERCENT_DEFAULT;
+    const percent = 100 * Math.pow(gain, 1 / GAIN_EXPONENT);
+    const snapped = Math.round(percent / GAIN_PERCENT_STEP) * GAIN_PERCENT_STEP;
+    return Math.max(GAIN_PERCENT_MIN, Math.min(GAIN_PERCENT_MAX, snapped));
+}
+
+/**
+ * Paint a slider's filled portion. The fraction goes to the `--fill` custom
+ * property, which style.css turns into the track gradient. Set through the CSSOM,
+ * which the strict CSP (`style-src 'self'`, no inline styles) does not gate.
+ */
+function updateSliderFill(slider) {
+    const min = parseFloat(slider.min);
+    const max = parseFloat(slider.max);
+    const fraction = max > min ? (parseFloat(slider.value) - min) / (max - min) : 0;
+    slider.style.setProperty('--fill', `${(fraction * 100).toFixed(2)}%`);
+}
+
 /** Apply a { noise_gate, gain, latency_threshold } object to the settings UI. */
 function applySettingsToUI(s) {
     if (s.noise_gate !== undefined) {
@@ -524,15 +573,21 @@ function applySettingsToUI(s) {
         const db = Math.max(-100, Math.min(0, noiseGateToDb(parseFloat(s.noise_gate))));
         ngSlider.value = db;
         ngValue.textContent = db <= -100 ? 'Off' : `${db} dB`;
+        updateSliderFill(ngSlider);
     }
     if (s.gain !== undefined) {
-        gainSlider.value = s.gain;
-        gainValue.textContent = parseFloat(s.gain).toFixed(1) + 'x';
+        // Stored values stay linear, so settings saved by older versions (0.2x–3.0x)
+        // map straight onto the percentage slider (e.g. 3.0x -> 195%).
+        const percent = gainToPercent(parseFloat(s.gain));
+        gainSlider.value = percent;
+        gainValue.textContent = `${percent}%`;
+        updateSliderFill(gainSlider);
     }
     if (s.latency_threshold !== undefined) {
         const lt = parseInt(s.latency_threshold);
         lrSlider.value = lt;
         lrValue.textContent = lt === 0 ? 'Off' : `${lt} ms`;
+        updateSliderFill(lrSlider);
     }
 }
 
@@ -563,7 +618,7 @@ async function fetchSettings() {
 async function updateServerSettings() {
     const settings = {
         noise_gate: dbToNoiseGate(parseInt(ngSlider.value)),
-        gain: parseFloat(gainSlider.value),
+        gain: percentToGain(parseInt(gainSlider.value)),
         latency_threshold: parseInt(lrSlider.value),
     };
 
@@ -597,7 +652,7 @@ function sendGateToWorklet() {
 /** Push the current output gain (linear multiplier) to the worklet. */
 function sendGainToWorklet() {
     if (!workletNode) return;
-    workletNode.port.postMessage({ type: 'gain', value: parseFloat(gainSlider.value) });
+    workletNode.port.postMessage({ type: 'gain', value: percentToGain(parseInt(gainSlider.value)) });
 }
 
 /** Tell the worklet whether we are muted, so it can skip all work while muted. */
@@ -768,8 +823,9 @@ function stopStreaming() {
     micRing.classList.remove('active');
     micBtn.classList.remove('muted');
     micRing.classList.remove('muted');
-    micRing.classList.remove('voice');
+    micRing.classList.remove('voice', 'clip');
     clearTimeout(voiceTimeout);
+    clearTimeout(clipTimeout);
     micIcon.textContent = '🎙';
     micHint.textContent = 'Tap to start streaming';
     setConnected(false);
@@ -883,6 +939,14 @@ async function setupAudioGraph() {
             micRing.classList.add('voice');
             clearTimeout(voiceTimeout);
             voiceTimeout = setTimeout(() => micRing.classList.remove('voice'), 200);
+            // The gained signal hit full scale and the worklet had to cut it: flash
+            // the ring red, held ~1s past the last clipped packet so the user can
+            // react (turn the gain down) rather than miss a 10ms blip.
+            if (d.clip) {
+                micRing.classList.add('clip');
+                clearTimeout(clipTimeout);
+                clipTimeout = setTimeout(() => micRing.classList.remove('clip'), 1000);
+            }
             sendAudioPacket(d.frame);
         }
     };

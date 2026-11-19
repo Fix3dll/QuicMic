@@ -467,6 +467,24 @@ body {
     margin: 0;
     box-sizing: content-box;
     background-clip: content-box;
+    /* Filled track: the colour layer shows up to --fill (set from JS, 0–100%), the
+       unfilled remainder keeps the plain track colour. Only background-image is
+       set here, so the content-box clip above still applies to every layer. */
+    --fill: 0%;
+    --fill-colors: linear-gradient(90deg, var(--accent), var(--accent));
+    background-image:
+        linear-gradient(90deg, transparent var(--fill), var(--bg-primary) var(--fill)),
+        var(--fill-colors);
+}
+
+/* Gain: like a media player's volume, the fill turns yellow then red past 100%
+   (27.27% of the 25–300% track), warning that loud input may start to clip. */
+#gain-slider {
+    --fill-colors: linear-gradient(90deg,
+            var(--accent) 0%,
+            var(--accent) 27.27%,
+            var(--yellow) 55%,
+            var(--red) 100%);
 }
 
 .slider::-webkit-slider-thumb {
@@ -534,6 +552,16 @@ body {
 .mic-ring.active.voice {
     border-color: #a78bfa;
     box-shadow: 0 0 64px var(--accent-glow), 0 0 24px var(--accent);
+}
+
+/* Clipping (the gain pushed the signal past full scale): flash red. Snaps on
+   fast so a short clip is not missed, then fades back over the base 0.6s
+   transition once the hold timer in app.js removes the class. Red is used by no
+   other ring state (yellow = muted), so it reads unambiguously. */
+.mic-ring.active.clip {
+    border-color: var(--red);
+    box-shadow: 0 0 64px var(--red-glow), 0 0 24px var(--red);
+    transition: border-color 0.08s ease, box-shadow 0.08s ease;
 }
 
 @keyframes ringPulse {

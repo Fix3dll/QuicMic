@@ -36,8 +36,11 @@ use websocket::handle_ws_upgrade;
 /// ranges. These mirror the web UI slider limits.
 pub(crate) const NOISE_GATE_MIN: f32 = 0.0;
 pub(crate) const NOISE_GATE_MAX: f32 = 1.0;
-pub(crate) const GAIN_MIN: f32 = 0.2;
-pub(crate) const GAIN_MAX: f32 = 3.0;
+/// Linear gain bounds. The web UI shows gain as a perceived-loudness percentage
+/// (25%–300%, `amplitude = (percent/100)^1.66`), i.e. 0.1x (-20 dB) to ~6.2x
+/// (+16 dB); `GAIN_MAX` leaves a little headroom above the slider's top.
+pub(crate) const GAIN_MIN: f32 = 0.1;
+pub(crate) const GAIN_MAX: f32 = 6.3;
 pub(crate) const LATENCY_THRESHOLD_MAX_MS: u32 = 500;
 
 /// Constant-time byte-slice equality, so response timing does not reveal how many
@@ -352,12 +355,15 @@ mod tests {
             .await
             .unwrap();
         let json = body_json(resp).await;
-        assert_eq!(json["gain"].as_f64().unwrap(), GAIN_MAX as f64);
+        // The settings are f32 on the server and serde_json prints an f32 in its
+        // shortest form (6.3, not 6.300000190734863), so compare in f32 — widening
+        // GAIN_MAX to f64 would only match bounds that are exact in binary.
+        assert_eq!(json["gain"].as_f64().unwrap() as f32, GAIN_MAX);
         assert_eq!(
             json["latency_threshold"].as_u64().unwrap(),
             LATENCY_THRESHOLD_MAX_MS as u64
         );
-        assert_eq!(json["noise_gate"].as_f64().unwrap(), NOISE_GATE_MAX as f64);
+        assert_eq!(json["noise_gate"].as_f64().unwrap() as f32, NOISE_GATE_MAX);
     }
 
     #[tokio::test]

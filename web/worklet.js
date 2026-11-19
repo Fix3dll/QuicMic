@@ -16,8 +16,12 @@
  *   main -> worklet: { type: 'gate', threshold }  (linear amplitude, 0 = off)
  *                    { type: 'gain', value }       (linear output multiplier)
  *                    { type: 'mute', muted }
- *   worklet -> main: { frame: ArrayBuffer, level } (gate open)
- *                    { level }                      (gated, throttled)
+ *   worklet -> main: { frame: ArrayBuffer, level, clip } (gate open)
+ *                    { level }                            (gated, throttled)
+ *
+ * `level` is the post-gain VU level (so the meter follows the gain slider);
+ * `clip` is true when the gain pushed at least one sample past full scale and it
+ * had to be cut, which is what drives the red clipping flash on the mic ring.
  *
  * `frame` is the full wire packet: HEADER_BYTES of empty space (the main thread
  * stamps the sequence number there) followed by the Int16 PCM. Building it here
@@ -114,20 +118,27 @@ class MicProcessor extends AudioWorkletProcessor {
                 const pcm = new Int16Array(frame, HEADER_BYTES, SAMPLES_PER_PACKET);
                 // Convert Float32 [-1, 1] to Int16 and accumulate energy in one pass.
                 let sumSq = 0;
+                let outSumSq = 0;
+                let clipped = false;
                 for (let j = 0; j < SAMPLES_PER_PACKET; j++) {
                     const raw = Math.max(-1, Math.min(1, this.buffer[j]));
-                    // Gate and VU use the raw (pre-gain) energy, matching the old
-                    // server-side semantics.
+                    // The gate decides on the raw (pre-gain) energy, matching the old
+                    // server-side semantics, so its threshold is independent of gain.
                     const rawInt = raw < 0 ? raw * 0x8000 : raw * 0x7FFF;
                     sumSq += rawInt * rawInt;
                     // The output carries the gain, applied in the float domain
-                    // (no double quantization) and clamped to [-1, 1].
-                    const g = Math.max(-1, Math.min(1, raw * this.gain));
+                    // (no double quantization) and clamped to [-1, 1]. A sample that
+                    // needs the clamp is a hard clip: audible distortion.
+                    const amplified = raw * this.gain;
+                    if (amplified > 1 || amplified < -1) clipped = true;
+                    const g = Math.max(-1, Math.min(1, amplified));
+                    outSumSq += g * g;
                     pcm[j] = g < 0 ? g * 0x8000 : g * 0x7FFF;
                 }
 
-                // Linear VU percentage (matches the old main-thread meter).
-                const rms = Math.sqrt(sumSq / SAMPLES_PER_PACKET) / 32768;
+                // Linear VU percentage of what is actually sent (post-gain), so the
+                // meter visibly follows the gain slider. Same scale as before.
+                const rms = Math.sqrt(outSumSq / SAMPLES_PER_PACKET);
                 const level = Math.max(0, Math.min(100, rms * 300));
 
                 // Gate decision: a threshold of 0 means the gate is off.
@@ -148,7 +159,7 @@ class MicProcessor extends AudioWorkletProcessor {
                         this.prevFrame = null;
                     }
                     this.silenceCount = 0;
-                    this.port.postMessage({ frame, level }, [frame]);
+                    this.port.postMessage({ frame, level, clip: clipped }, [frame]);
                 } else {
                     // Gated: retain this packet as the potential onset for the next
                     // open edge, and drip a throttled level so the VU falls to zero.

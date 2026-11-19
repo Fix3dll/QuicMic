@@ -205,7 +205,7 @@ Run `quicmic -h` for the full list. The main options:
 | `--ip <IP>` | auto-detected | Override the auto-detected LAN IP address. |
 | `--pin <PIN>` | random | Use a fixed pairing PIN instead of a random 6-digit one. |
 | `--noise-gate <DB>` | `-50` | Initial noise-gate threshold in **dB**, from `-100` (Off) to `0`. Matches the web UI slider. Adjustable at runtime. |
-| `--gain <VALUE>` | `1.0` | Initial gain multiplier (`1.0` = unity). Adjustable at runtime. |
+| `--gain <VALUE>` | `1.0` | Initial gain as a linear multiplier (`1.0` = unity, `0.1`–`6.3`; e.g. `3.16` = 200% in the web UI). Adjustable at runtime. |
 | `--latency-threshold <MS>` | `150` | Initial latency-recovery threshold in milliseconds (`0` = off). Adjustable at runtime. |
 | `--dump-certs` | — | Write the generated certificate/key to `certs/` for debugging. |
 | `--no-update-check` | — | Disable the startup check for a newer release on GitHub (also via `QUICMIC_NO_UPDATE_CHECK`). |
@@ -225,7 +225,7 @@ quicmic --device "CABLE Input"
 From the phone's ⚙️ **Settings** panel (synced to the server live):
 
 - **Noise Gate** (−100 dB *Off* … 0 dB) — silences input below a threshold, with a short hold to avoid choppiness.
-- **Gain** (0.2×–3.0×) — boosts or attenuates the signal.
+- **Gain** (25%–300%, default 100%) — boosts or attenuates the signal. The percentage is *perceived* loudness, like a media player's volume: 200% sounds twice as loud, 50% half as loud. Past 100% the slider turns yellow → red, and the mic ring flashes red if loud input actually clips — turn it down a little when you see that.
 - **Latency Recovery** (0 *Off* … 500 ms) — if the server's buffer grows past this, the oldest audio is skipped to catch back up.
 - **🔋 Eco Mode** — black-screen overlay; keeps streaming alive behind a screen wake lock.
 - **Mute** — long-press the mic button (with haptic feedback on devices that support the Vibration API, e.g. Android; iOS Safari does not).
